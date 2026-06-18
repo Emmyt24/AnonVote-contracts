@@ -13,6 +13,7 @@ import {
   sorobanRecordVote,
   sorobanRecordResult,
   sorobanGetAuditCounts,
+  sorobanResultExists,
   SorobanErrorCode,
   type SorobanConfig,
 } from "./sorobanService";
@@ -157,5 +158,20 @@ describe("AnonVote ballot lifecycle (mocked contract, no live network)", () => {
     } else {
       expect(result.txHash).toBeTypeOf("string");
     }
+  });
+
+  it("sorobanResultExists returns false before publication and true after", async () => {
+    const config = makeConfig();
+    const ballotIdHash = "ballot-hash-006";
+
+    await sorobanRecordBallot(config, ballotIdHash);
+
+    const beforeResult = await sorobanResultExists(config, ballotIdHash);
+    expect(beforeResult).toBe(false);
+
+    await sorobanRecordResult(config, ballotIdHash, "result-hash-ddd");
+
+    const afterResult = await sorobanResultExists(config, ballotIdHash);
+    expect(afterResult).toBe(true);
   });
 });

@@ -96,6 +96,11 @@ export class FakeLedger {
         return { ok: true, value: ballot?.resultHash ?? undefined };
       }
 
+      case "result_exists": {
+        const ballot = this.ballots.get(get(0) as string);
+        return { ok: true, value: ballot !== undefined && ballot.resultHash !== null };
+      }
+
       case "is_consistent": {
         const ballot = this.ballots.get(get(0) as string);
         if (!ballot) return { ok: true, value: true }; // 0 == 0, matches lib.rs default
