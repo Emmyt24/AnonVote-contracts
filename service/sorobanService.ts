@@ -851,6 +851,25 @@ export async function sorobanGetAuditCounts(
 }
 
 /**
+ * Check whether a result has already been published for a ballot (read-only).
+ * Use this to query finality before calling sorobanRecordResult.
+ * Returns true if a result hash exists on-chain, false if not yet published.
+ * Returns null if the config is invalid or the query fails.
+ */
+export async function sorobanResultExists(
+  config: SorobanConfig,
+  ballotIdHash: string,
+): Promise<boolean | null> {
+  const contractCheck = validateContractId(config.contractId);
+  if (!contractCheck.valid) return null;
+  const { value, errorCode } = await readContract(config, "result_exists", [
+    { value: ballotIdHash, type: "string" },
+  ]);
+  if (errorCode !== undefined) return null;
+  return (value as boolean) ?? false;
+}
+
+/**
  * Get complete ballot state snapshot (single read call).
  */
 export async function sorobanGetBallotState(
