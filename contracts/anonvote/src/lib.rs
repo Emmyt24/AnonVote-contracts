@@ -36,6 +36,32 @@ pub enum ContractError {
     ResultAlreadyPublished = 6,
     CounterOverflow       = 7,
     InvalidBallotHash     = 8,
+    RateLimitExceeded     = 9,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Operation {
+    RecordBallot,
+    RecordToken,
+    RecordVote,
+    RecordResult,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RateLimit {
+    pub calls_per_minute: u32,
+    pub calls_per_hour: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CallCounts {
+    pub minute_bucket: u64,
+    pub minute_calls: u32,
+    pub hour_bucket: u64,
+    pub hour_calls: u32,
 }
 
 // ── Ballot state types ────────────────────────────────────────────────────────
@@ -101,6 +127,22 @@ impl AnonVoteContract {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
+        let default_limit = RateLimit {
+            calls_per_minute: 100,
+            calls_per_hour: 1000,
+        };
+        env.storage()
+            .instance()
+            .set(&(symbol_short!("RateLimit"), Operation::RecordBallot), &default_limit);
+        env.storage()
+            .instance()
+            .set(&(symbol_short!("RateLimit"), Operation::RecordToken), &default_limit);
+        env.storage()
+            .instance()
+            .set(&(symbol_short!("RateLimit"), Operation::RecordVote), &default_limit);
+        env.storage()
+            .instance()
+            .set(&(symbol_short!("RateLimit"), Operation::RecordResult), &default_limit);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -121,6 +163,7 @@ impl AnonVoteContract {
             return Err(ContractError::InvalidBallotHash);
         }
         caller.require_auth();
+        Self::check_rate_limit(&env, &caller, Operation::RecordBallot)?;
         Self::require_admin(&env, &caller)?;
 
         let exists_key = DataKey::BallotExists(ballot_id_hash.clone());
@@ -170,6 +213,7 @@ impl AnonVoteContract {
         ballot_id_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::check_rate_limit(&env, &caller, Operation::RecordToken)?;
         Self::require_admin(&env, &caller)?;
         Self::require_ballot_exists(&env, &ballot_id_hash)?;
 
@@ -200,6 +244,7 @@ impl AnonVoteContract {
         ballot_id_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::check_rate_limit(&env, &caller, Operation::RecordVote)?;
         Self::require_admin(&env, &caller)?;
         Self::require_ballot_exists(&env, &ballot_id_hash)?;
 
@@ -233,6 +278,7 @@ impl AnonVoteContract {
         result_hash: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
+        Self::check_rate_limit(&env, &caller, Operation::RecordResult)?;
         Self::require_admin(&env, &caller)?;
         Self::require_ballot_exists(&env, &ballot_id_hash)?;
 
@@ -276,6 +322,21 @@ impl AnonVoteContract {
             (symbol_short!("audit"), symbol_short!("adm_rotd")),
             (caller, new_admin),
         );
+        Ok(())
+    }
+
+    /// Set rate limit for a specific operation (admin only).
+    pub fn set_rate_limit(
+        env: Env,
+        caller: Address,
+        operation: Operation,
+        limit: RateLimit,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+        env.storage()
+            .instance()
+            .set(&(symbol_short!("RateLimit"), operation), &limit);
         Ok(())
     }
 
@@ -424,6 +485,55 @@ impl AnonVoteContract {
         {
             return Err(ContractError::BallotNotFound);
         }
+        Ok(())
+    }
+
+    fn check_rate_limit(
+        env: &Env,
+        caller: &Address,
+        operation: Operation,
+    ) -> Result<(), ContractError> {
+        let now = env.ledger().timestamp();
+        let minute_bucket = now / 60;
+        let hour_bucket = now / 3600;
+
+        let limit: RateLimit = env
+            .storage()
+            .instance()
+            .get(&(symbol_short!("RateLimit"), operation.clone()))
+            .unwrap();
+
+        let counts_key = (symbol_short!("CallCnt"), caller.clone(), operation);
+        let mut counts = env
+            .storage()
+            .persistent()
+            .get(&counts_key)
+            .unwrap_or(CallCounts {
+                minute_bucket: 0,
+                minute_calls: 0,
+                hour_bucket: 0,
+                hour_calls: 0,
+            });
+
+        if counts.minute_bucket != minute_bucket {
+            counts.minute_bucket = minute_bucket;
+            counts.minute_calls = 0;
+        }
+        if counts.hour_bucket != hour_bucket {
+            counts.hour_bucket = hour_bucket;
+            counts.hour_calls = 0;
+        }
+
+        if counts.minute_calls >= limit.calls_per_minute
+            || counts.hour_calls >= limit.calls_per_hour
+        {
+            return Err(ContractError::RateLimitExceeded);
+        }
+
+        counts.minute_calls += 1;
+        counts.hour_calls += 1;
+        env.storage().persistent().set(&counts_key, &counts);
+
         Ok(())
     }
 }
@@ -729,5 +839,100 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::InvalidBallotHash);
+    }
+
+    #[test]
+    fn test_rate_limit_exceeded() {
+        let (env, contract_id, client, admin) = setup_with_id();
+        let ballot_hash = String::from_str(&env, "abc123");
+
+        let limit = RateLimit {
+            calls_per_minute: 2,
+            calls_per_hour: 100,
+        };
+        client.set_rate_limit(&admin, Operation::RecordToken, &limit).unwrap();
+
+        client.record_ballot(&admin, &ballot_hash).unwrap();
+        client.record_token(&admin, &ballot_hash).unwrap();
+        client.record_token(&admin, &ballot_hash).unwrap();
+
+        let err = client
+            .try_record_token(&admin, &ballot_hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::RateLimitExceeded);
+    }
+
+    #[test]
+    fn test_rate_limit_bucket_resets() {
+        let (env, contract_id, client, admin) = setup_with_id();
+        let ballot_hash = String::from_str(&env, "abc123");
+
+        let limit = RateLimit {
+            calls_per_minute: 2,
+            calls_per_hour: 100,
+        };
+        client.set_rate_limit(&admin, Operation::RecordToken, &limit).unwrap();
+
+        client.record_ballot(&admin, &ballot_hash).unwrap();
+        client.record_token(&admin, &ballot_hash).unwrap();
+        client.record_token(&admin, &ballot_hash).unwrap();
+
+        // Advance time to next minute bucket
+        use soroban_sdk::testutils::Ledger;
+        let current_time = env.ledger().timestamp();
+        env.ledger().set_timestamp(current_time + 60);
+
+        // Should now succeed
+        client.record_token(&admin, &ballot_hash).unwrap();
+    }
+
+    #[test]
+    fn test_different_operations_have_separate_limits() {
+        let (env, contract_id, client, admin) = setup_with_id();
+        let ballot_hash = String::from_str(&env, "abc123");
+
+        let token_limit = RateLimit {
+            calls_per_minute: 1,
+            calls_per_hour: 100,
+        };
+        let vote_limit = RateLimit {
+            calls_per_minute: 2,
+            calls_per_hour: 100,
+        };
+        client.set_rate_limit(&admin, Operation::RecordToken, &token_limit).unwrap();
+        client.set_rate_limit(&admin, Operation::RecordVote, &vote_limit).unwrap();
+
+        client.record_ballot(&admin, &ballot_hash).unwrap();
+        client.record_token(&admin, &ballot_hash).unwrap();
+        client.record_vote(&admin, &ballot_hash).unwrap();
+        client.record_vote(&admin, &ballot_hash).unwrap();
+
+        let err = client
+            .try_record_token(&admin, &ballot_hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::RateLimitExceeded);
+    }
+
+    #[test]
+    fn test_different_callers_have_separate_limits() {
+        let (env, contract_id, client, admin) = setup_with_id();
+        let ballot_hash = String::from_str(&env, "abc123");
+
+        let limit = RateLimit {
+            calls_per_minute: 1,
+            calls_per_hour: 100,
+        };
+        client.set_rate_limit(&admin, Operation::RecordToken, &limit).unwrap();
+
+        client.record_ballot(&admin, &ballot_hash).unwrap();
+        client.record_token(&admin, &ballot_hash).unwrap();
+
+        let new_admin = Address::generate(&env);
+        client.rotate_admin(&admin, &new_admin).unwrap();
+
+        // New admin should have their own rate limit and be able to call
+        client.record_token(&new_admin, &ballot_hash).unwrap();
     }
 }
