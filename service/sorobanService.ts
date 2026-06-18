@@ -35,6 +35,9 @@ export enum SorobanErrorCode {
   ResultAlreadyPublished = 6,
   CounterOverflow        = 7,
   InvalidBallotHash      = 8,
+  UpgradeAlreadyScheduled = 9,
+  NoUpgradeScheduled    = 10,
+  TimeLockNotExpired    = 11,
   // Non-contract errors
   SimulationFailed       = 100,
   TransactionFailed      = 101,
@@ -51,6 +54,9 @@ const ERROR_MESSAGES: Record<SorobanErrorCode, string> = {
   [SorobanErrorCode.ResultAlreadyPublished]: "A different result hash is already published for this ballot",
   [SorobanErrorCode.CounterOverflow]:        "Counter has reached u32::MAX",
   [SorobanErrorCode.InvalidBallotHash]:      "Ballot hash must not be empty",
+  [SorobanErrorCode.UpgradeAlreadyScheduled]: "An upgrade is already scheduled",
+  [SorobanErrorCode.NoUpgradeScheduled]:    "No upgrade is currently scheduled",
+  [SorobanErrorCode.TimeLockNotExpired]:    "Time lock has not yet expired for the scheduled upgrade",
   [SorobanErrorCode.SimulationFailed]:       "Transaction simulation failed",
   [SorobanErrorCode.TransactionFailed]:      "Transaction submission failed",
   [SorobanErrorCode.NetworkError]:           "Network or RPC error",
@@ -113,7 +119,10 @@ export type SorobanAuditEventType =
   | "vote_cast"
   | "result_published"
   | "counter_overflow"
-  | "admin_rotated";
+  | "admin_rotated"
+  | "upgrade_scheduled"
+  | "upgrade_canceled"
+  | "upgrade_executed";
 
 export interface SorobanEventFilter {
   eventType?: SorobanAuditEventType | string;
@@ -137,8 +146,12 @@ export interface SorobanEventData {
   previousAdmin?: string | undefined;
   newAdmin?: string | undefined;
   resultHash?: string | undefined;
+  newWasmHash?: string | undefined;
+  scheduledAt?: number | undefined;
+  executableAt?: number | undefined;
   topics: unknown[];
   value: unknown;
+}
 // ── Config validation ──────────────────────────────────────────────────────
 
 export interface ConfigError {
@@ -237,6 +250,12 @@ const EVENT_SYMBOL_TO_TYPE: Record<string, SorobanAuditEventType> = {
   counter_overflow: "counter_overflow",
   adm_rotd: "admin_rotated",
   admin_rotated: "admin_rotated",
+  upg_schd: "upgrade_scheduled",
+  upgrade_scheduled: "upgrade_scheduled",
+  upg_cncl: "upgrade_canceled",
+  upgrade_canceled: "upgrade_canceled",
+  upg_excd: "upgrade_executed",
+  upgrade_executed: "upgrade_executed",
 };
 
 const EVENT_TYPE_TO_SYMBOL: Record<SorobanAuditEventType, string> = {
@@ -246,6 +265,9 @@ const EVENT_TYPE_TO_SYMBOL: Record<SorobanAuditEventType, string> = {
   result_published: "res_pub",
   counter_overflow: "cnt_ovflw",
   admin_rotated: "adm_rotd",
+  upgrade_scheduled: "upg_schd",
+  upgrade_canceled: "upg_cncl",
+  upgrade_executed: "upg_excd",
 };
 
 const SOROBAN_EVENT_PAGE_LIMIT = 100;
@@ -337,6 +359,19 @@ export function parseSorobanEvent(event: unknown): SorobanEventData {
     case "admin_rotated":
       parsed.previousAdmin = tuple[0] !== undefined ? String(tuple[0]) : undefined;
       parsed.newAdmin = tuple[1] !== undefined ? String(tuple[1]) : undefined;
+      break;
+    case "upgrade_scheduled":
+      parsed.admin = tuple[0] !== undefined ? String(tuple[0]) : undefined;
+      parsed.newWasmHash = tuple[1] !== undefined ? String(tuple[1]) : undefined;
+      parsed.scheduledAt = tuple[2] !== undefined ? Number(tuple[2]) : undefined;
+      parsed.executableAt = tuple[3] !== undefined ? Number(tuple[3]) : undefined;
+      break;
+    case "upgrade_canceled":
+      parsed.admin = tuple[0] !== undefined ? String(tuple[0]) : undefined;
+      parsed.newWasmHash = tuple[1] !== undefined ? String(tuple[1]) : undefined;
+      break;
+    case "upgrade_executed":
+      parsed.newWasmHash = tuple[0] !== undefined ? String(tuple[0]) : undefined;
       break;
   }
 
@@ -828,4 +863,86 @@ export async function sorobanGetBallotState(
     { value: ballotIdHash, type: "string" },
   ]);
   return value as BallotStateSnapshot | null;
+}
+
+// ── Upgrade helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Schedule a contract upgrade (admin only).
+ */
+export async function sorobanScheduleUpgrade(
+  config: SorobanConfig,
+  newWasmHash: string,
+): Promise<SorobanInvokeResult> {
+  const configCheck = validateSorobanConfig(config);
+  if (!configCheck.valid) {
+    console.warn(`[Soroban] sorobanScheduleUpgrade: ${configCheck.error.message}`);
+    return { txHash: "", success: false, ...makeError(SorobanErrorCode.NotConfigured) };
+  }
+  const caller = StellarSdk.Keypair.fromSecret(config.stellarSecretKey).publicKey();
+  const result = await invokeContract(config, "schedule_upgrade", [
+    { value: caller, type: "address" },
+    { value: newWasmHash, type: "bytes" },
+  ]);
+  if (!result.success && result.errorCode !== undefined) {
+    console.error(
+      `[Soroban] sorobanScheduleUpgrade failed — ${SorobanErrorCode[result.errorCode]}: ${result.errorMessage}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Cancel a pending upgrade (admin only).
+ */
+export async function sorobanCancelUpgrade(
+  config: SorobanConfig,
+): Promise<SorobanInvokeResult> {
+  const configCheck = validateSorobanConfig(config);
+  if (!configCheck.valid) {
+    console.warn(`[Soroban] sorobanCancelUpgrade: ${configCheck.error.message}`);
+    return { txHash: "", success: false, ...makeError(SorobanErrorCode.NotConfigured) };
+  }
+  const caller = StellarSdk.Keypair.fromSecret(config.stellarSecretKey).publicKey();
+  const result = await invokeContract(config, "cancel_upgrade", [
+    { value: caller, type: "address" },
+  ]);
+  if (!result.success && result.errorCode !== undefined) {
+    console.error(
+      `[Soroban] sorobanCancelUpgrade failed — ${SorobanErrorCode[result.errorCode]}: ${result.errorMessage}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Execute a scheduled upgrade (anyone can call, after time lock).
+ */
+export async function sorobanExecuteUpgrade(
+  config: SorobanConfig,
+): Promise<SorobanInvokeResult> {
+  const configCheck = validateSorobanConfig(config);
+  if (!configCheck.valid) {
+    console.warn(`[Soroban] sorobanExecuteUpgrade: ${configCheck.error.message}`);
+    return { txHash: "", success: false, ...makeError(SorobanErrorCode.NotConfigured) };
+  }
+  const result = await invokeContract(config, "execute_upgrade", []);
+  if (!result.success && result.errorCode !== undefined) {
+    console.error(
+      `[Soroban] sorobanExecuteUpgrade failed — ${SorobanErrorCode[result.errorCode]}: ${result.errorMessage}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Get pending upgrade info (if any).
+ */
+export async function sorobanGetPendingUpgrade(
+  config: SorobanConfig,
+): Promise<{ newWasmHash: string; scheduledAt: number; executableAt: number } | null> {
+  const contractCheck = validateContractId(config.contractId);
+  if (!contractCheck.valid) return null;
+  const { value } = await readContract(config, "get_pending_upgrade", []);
+  return value as { newWasmHash: string; scheduledAt: number; executableAt: number } | null;
 }

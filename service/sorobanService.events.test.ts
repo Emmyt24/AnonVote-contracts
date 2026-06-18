@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "vitest";
 
 import {
   type SorobanConfig,
@@ -14,9 +13,9 @@ function makeConfig(events: unknown[], calls: unknown[] = []): SorobanConfig {
     rpcServer: {
       async getEvents(request: unknown) {
         calls.push(request);
-        return { events };
+        return { events, latestLedger: 1000 };
       },
-    },
+    } as any,
   };
 }
 
@@ -44,11 +43,11 @@ describe("sorobanFilterEvents", () => {
 
     const events = await sorobanFilterEvents(config, { eventType: "token_issued" });
 
-    assert.equal(events.length, 1);
-    assert.equal(events[0].eventType, "token_issued");
-    assert.equal(events[0].ballotIdHash, "ballot-a");
-    assert.equal(events[0].count, 1);
-    assert.equal(calls.length, 1);
+    expect(events.length).toBe(1);
+    expect(events[0]!.eventType).toBe("token_issued");
+    expect(events[0]!.ballotIdHash).toBe("ballot-a");
+    expect(events[0]!.count).toBe(1);
+    expect(calls.length).toBe(1);
   });
 
   it("filters audit events by ballot ID and ledger close time range", async () => {
@@ -93,8 +92,8 @@ describe("sorobanFilterEvents", () => {
       endTime: Date.parse("2026-06-17T10:02:00Z") / 1000,
     });
 
-    assert.deepEqual(events.map((event) => event.id), ["3"]);
-    assert.equal(events[0].eventType, "token_issued");
-    assert.equal(events[0].count, 2);
+    expect(events.map((event) => event.id)).toEqual(["3"]);
+    expect(events[0]!.eventType).toBe("token_issued");
+    expect(events[0]!.count).toBe(2);
   });
 });
