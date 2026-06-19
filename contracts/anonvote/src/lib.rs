@@ -43,6 +43,34 @@ pub enum ContractError {
     UpgradeAlreadyScheduled = 9,
     NoUpgradeScheduled    = 10,
     TimeLockNotExpired    = 11,
+    RateLimitExceeded     = 12,
+}
+
+// ── Rate limiting types ───────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Operation {
+    RecordBallot,
+    RecordToken,
+    RecordVote,
+    RecordResult,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RateLimit {
+    pub calls_per_minute: u32,
+    pub calls_per_hour: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallCounts {
+    pub minute_bucket: u64,
+    pub minute_calls: u32,
+    pub hour_bucket: u64,
+    pub hour_calls: u32,
 }
 
 // ── Upgrade types ─────────────────────────────────────────────────────────────
@@ -214,7 +242,7 @@ impl AnonVoteContract {
         if count == u32::MAX {
             env.events().publish(
                 (symbol_short!("audit"), symbol_short!("cnt_ovflw")),
-                ballot_id_hash,
+                (ballot_id_hash, count),
             );
             return Err(ContractError::CounterOverflow);
         }
@@ -245,7 +273,7 @@ impl AnonVoteContract {
         if count == u32::MAX {
             env.events().publish(
                 (symbol_short!("audit"), symbol_short!("cnt_ovflw")),
-                ballot_id_hash,
+                (ballot_id_hash, count),
             );
             return Err(ContractError::CounterOverflow);
         }
