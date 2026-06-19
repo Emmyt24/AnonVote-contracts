@@ -633,15 +633,16 @@ impl AnonVoteContract {
             let key = DataKey::BallotExpired(ballot_id_hash.clone());
             let expired = env.storage().persistent().get(&key).unwrap_or(false);
             if !expired {
-                log!(&env,"Not expire, gonna expire now");
                 env.storage().persistent().set(&key, &true);
 
-                // env.events().publish(
-                //     (symbol_short!("audit"), symbol_short!("expire")),
-                //     ballot_id_hash,
-                // );
+                env.events().publish(
+                    (symbol_short!("audit"), symbol_short!("expire")),
+                    ballot_id_hash.clone(),
+                );
             }
         }
+    }
+    
     fn check_rate_limit(
         env: &Env,
         caller: &Address,
