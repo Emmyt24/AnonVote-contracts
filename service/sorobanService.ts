@@ -884,6 +884,21 @@ export async function sorobanGetBallotState(
   return value as BallotStateSnapshot | null;
 }
 
+/**
+ * Get complete ballot expiration (single read call).
+ */
+export async function sorobanGetBallotExpiration(
+  config: SorobanConfig,
+  ballotIdHash: string,
+): Promise<boolean | null> {
+  const contractCheck = validateContractId(config.contractId);
+  if (!contractCheck.valid) return null;
+  const { value } = await readContract(config, "get_ballot_expiration", [
+    { value: ballotIdHash, type: "string" },
+  ]);
+  return value as boolean | null;
+}
+
 // ── Upgrade helpers ──────────────────────────────────────────────────────────
 
 /**
